@@ -2,6 +2,8 @@
 
 **Professional-grade Polar H10 ECG band data acquisition & live visualization for PC.**
 
+![App Screenshot](app.png)
+
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey)
