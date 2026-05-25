@@ -1,1 +1,0 @@
-Phone timestamp;Marker start/stop
