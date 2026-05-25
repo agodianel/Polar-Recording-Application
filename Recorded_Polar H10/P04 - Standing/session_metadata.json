@@ -1,0 +1,39 @@
+{
+  "device": {
+    "name": "Polar H10 16E0A933",
+    "address": "24:AC:AC:16:E0:A9",
+    "model": "Polar_H10",
+    "id": "16E0A933"
+  },
+  "session": {
+    "start": "2026-05-03T19:40:50.911230",
+    "end": "2026-05-03T19:44:27.014483",
+    "duration_seconds": 216.103253
+  },
+  "streams": {
+    "ecg": {
+      "enabled": true,
+      "sample_rate": 130,
+      "resolution": 14,
+      "total_samples": 28105
+    },
+    "acc": {
+      "enabled": true,
+      "sample_rate": 200,
+      "resolution": 16,
+      "range_g": 8,
+      "total_samples": 43596
+    },
+    "hr": {
+      "enabled": true,
+      "total_samples": 216,
+      "total_rr_intervals": 264
+    }
+  },
+  "markers": [],
+  "software": {
+    "name": "PolarRecorder",
+    "version": "1.0.0",
+    "platform": "PC/Python"
+  }
+}
