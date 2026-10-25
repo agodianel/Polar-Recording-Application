@@ -48,6 +48,7 @@ class HRSample:
     phone_timestamp: datetime
     heart_rate_bpm: int
     rr_intervals_ms: List[float] = field(default_factory=list)
+    sensor_contact: Optional[bool] = None  # None if the strap doesn't report it
 
 
 @dataclass

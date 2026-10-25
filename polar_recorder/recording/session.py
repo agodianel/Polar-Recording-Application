@@ -6,7 +6,8 @@ and session metadata.
 
 import json
 import logging
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List
 
@@ -20,9 +21,43 @@ from polar_recorder.ble.data_models import (
     DeviceInfo,
 )
 from polar_recorder.recording.writer import CSVWriter
-from polar_recorder.utils.config import RecordingConfig, StreamConfig
+from polar_recorder.utils.config import APP_NAME, APP_VERSION, RecordingConfig, StreamConfig
 
 logger = logging.getLogger(__name__)
+
+TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
+
+
+def _format_ts(dt: datetime) -> str:
+    return dt.strftime(TS_FORMAT)[:-3]
+
+
+def sanitize_folder_name(name: str) -> str:
+    """Make a user-entered label safe to use as a folder name on any OS."""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+    return name.strip().rstrip(".")
+
+
+def frame_sample_timestamps(
+    frame_ts_ns: int, prev_frame_ts_ns: Optional[int], n: int, nominal_rate_hz: float
+) -> tuple[list[int], float]:
+    """Per-sample sensor timestamps for a PMD frame.
+
+    Polar stamps each frame with the time of its *last* sample (the convention
+    the Polar BLE SDK uses). The sample period is taken from the gap to the
+    previous frame, which follows the strap's real clock (~130.2 Hz rather than
+    exactly 130 Hz); it falls back to the nominal rate for the first frame or
+    when a frame was dropped.
+
+    Returns:
+        (timestamps in ns, sample period in ns)
+    """
+    period = 1e9 / nominal_rate_hz
+    if prev_frame_ts_ns is not None and n > 0:
+        measured = (frame_ts_ns - prev_frame_ts_ns) / n
+        if abs(measured - period) <= 0.1 * period:
+            period = measured
+    return [round(frame_ts_ns - (n - 1 - i) * period) for i in range(n)], period
 
 
 class RecordingSession:
@@ -37,13 +72,18 @@ class RecordingSession:
         device_info: DeviceInfo,
         config: RecordingConfig,
         stream_config: StreamConfig,
+        label: str = "",
+        battery_level: Optional[int] = None,
     ):
         self.device_info = device_info
         self.config = config
         self.stream_config = stream_config
+        self.label = label.strip()
+        self.battery_level = battery_level
 
         self._session_start: Optional[datetime] = None
         self._session_end: Optional[datetime] = None
+        self._end_reason: Optional[str] = None
         self._active = False
 
         # Writers for each data type
@@ -61,6 +101,11 @@ class RecordingSession:
         self._markers: List[MarkerEvent] = []
         self._rr_buffer: List[float] = []  # For HRV RMSSD calculation
 
+        # Previous frame timestamps, for per-sample timestamp interpolation
+        self._prev_ecg_frame_ts: Optional[int] = None
+        self._prev_acc_frame_ts: Optional[int] = None
+        self._first_ecg_ts: Optional[int] = None
+
         # Session directory
         self._session_dir: Optional[Path] = None
 
@@ -71,6 +116,10 @@ class RecordingSession:
     @property
     def session_dir(self) -> Optional[Path]:
         return self._session_dir
+
+    @property
+    def start_time(self) -> Optional[datetime]:
+        return self._session_start
 
     @property
     def duration_seconds(self) -> float:
@@ -92,6 +141,23 @@ class RecordingSession:
             "duration_sec": self.duration_seconds,
         }
 
+    def _make_session_dir(self, timestamp_str: str) -> Path:
+        default_name = (
+            f"{self.device_info.device_model}_{self.device_info.device_id}"
+            f"_{timestamp_str}"
+        )
+        name = sanitize_folder_name(self.label) or default_name
+        path = self.config.output_dir / name
+        if path.exists() and self.label:
+            path = self.config.output_dir / f"{name}_{timestamp_str}"
+        counter = 2
+        base = path
+        while path.exists():
+            path = base.with_name(f"{base.name}_{counter}")
+            counter += 1
+        path.mkdir(parents=True)
+        return path
+
     def start(self) -> Path:
         """Start a new recording session, creating output files.
 
@@ -100,61 +166,69 @@ class RecordingSession:
         """
         self._session_start = datetime.now()
         timestamp_str = self._session_start.strftime("%Y%m%d_%H%M%S")
-
-        # Create session directory
-        session_name = (
-            f"{self.device_info.device_model}_{self.device_info.device_id}"
-            f"_{timestamp_str}"
-        )
-        self._session_dir = self.config.output_dir / session_name
-        self._session_dir.mkdir(parents=True, exist_ok=True)
+        self._session_dir = self._make_session_dir(timestamp_str)
 
         # File naming: match Android app format
         base = f"{self.device_info.device_model}_{self.device_info.device_id}_{timestamp_str}"
+        flush_sec = self.config.flush_interval_sec
 
         # Create writers for enabled streams
         if self.stream_config.ecg.enabled:
             self._ecg_writer = CSVWriter(
                 self._session_dir / f"{base}_ECG.txt",
                 header="Phone timestamp;sensor timestamp [ns];timestamp [ms];ecg [uV]",
+                flush_interval_sec=flush_sec,
             )
 
         if self.stream_config.acc.enabled:
             self._acc_writer = CSVWriter(
                 self._session_dir / f"{base}_ACC.txt",
                 header="Phone timestamp;sensor timestamp [ns];X [mg];Y [mg];Z [mg]",
+                flush_interval_sec=flush_sec,
             )
 
         if self.stream_config.hr.enabled:
             self._hr_writer = CSVWriter(
                 self._session_dir / f"{base}_HR.txt",
                 header="Phone timestamp;HR [bpm];HRV [ms];Breathing interval [rpm];",
+                flush_interval_sec=flush_sec,
             )
             self._rr_writer = CSVWriter(
                 self._session_dir / f"{base}_RR.txt",
                 header="Phone timestamp;RR-interval [ms]",
+                flush_interval_sec=flush_sec,
             )
 
-        # Marker writer
+        # Marker writer — markers are rare and important, write each one immediately
         self._marker_writer = CSVWriter(
             self._session_dir / f"MARKER_{timestamp_str}.txt",
             header="Phone timestamp;Marker start/stop",
+            buffer_size=1,
         )
 
         self._active = True
+        # Written now so a crashed session still documents its configuration
+        self._write_metadata()
         logger.info(f"Recording session started: {self._session_dir}")
         return self._session_dir
 
-    def stop(self) -> dict:
+    def stop(self, reason: str = "user") -> dict:
         """Stop the recording session, flush and close all writers.
+
+        Args:
+            reason: Why the session ended (stored in the metadata).
 
         Returns:
             Final session statistics.
         """
+        if not self._active:
+            return self.stats
+
         self._session_end = datetime.now()
+        self._end_reason = reason
         self._active = False
 
-        # Close all writers
+        # Close all writers; keep going if one fails so the others still get saved
         for writer in [
             self._ecg_writer,
             self._acc_writer,
@@ -163,14 +237,20 @@ class RecordingSession:
             self._marker_writer,
         ]:
             if writer:
-                writer.close()
+                try:
+                    writer.close()
+                except OSError as e:
+                    logger.error(f"Failed to close {writer.filepath}: {e}")
 
         # Write session metadata
-        self._write_metadata()
+        try:
+            self._write_metadata()
+        except OSError as e:
+            logger.error(f"Failed to write session metadata: {e}")
 
         stats = self.stats
         logger.info(
-            f"Recording session stopped. Duration: {stats['duration_sec']:.1f}s, "
+            f"Recording session stopped ({reason}). Duration: {stats['duration_sec']:.1f}s, "
             f"ECG: {stats['ecg_samples']}, ACC: {stats['acc_samples']}, "
             f"HR: {stats['hr_samples']}, RR: {stats['rr_samples']}"
         )
@@ -179,35 +259,48 @@ class RecordingSession:
     def write_ecg(self, sample: ECGSample) -> None:
         """Write ECG data to file.
 
-        Expands the packet into individual samples with interpolated timestamps,
-        matching the Android app's output format.
+        Expands the packet into individual samples with interpolated sensor and
+        phone timestamps, matching the Android app's output format.
         """
         if not self._active or not self._ecg_writer:
             return
 
-        base_ts_ns = sample.sensor_timestamp_ns
-        period_ns = int(1e9 / sample.sample_rate)  # ~7,692,308 ns for 130 Hz
+        n = len(sample.samples_uv)
+        sensor_ts, period_ns = frame_sample_timestamps(
+            sample.sensor_timestamp_ns, self._prev_ecg_frame_ts, n,
+            self.stream_config.ecg.sample_rate,
+        )
+        self._prev_ecg_frame_ts = sample.sensor_timestamp_ns
+        if self._first_ecg_ts is None and sensor_ts:
+            self._first_ecg_ts = sensor_ts[0]
 
-        for i, uv_value in enumerate(sample.samples_uv):
-            sample_ts_ns = base_ts_ns + (i * period_ns)
-            elapsed_ms = (i * period_ns) / 1e6
-
-            ts_str = sample.phone_timestamp.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+        for i, (ts_ns, uv_value) in enumerate(zip(sensor_ts, sample.samples_uv)):
+            phone_ts = sample.phone_timestamp - timedelta(
+                microseconds=(n - 1 - i) * period_ns / 1000
+            )
+            elapsed_ms = (ts_ns - self._first_ecg_ts) / 1e6
             self._ecg_writer.write_row(
-                f"{ts_str};{sample_ts_ns};{elapsed_ms:.6f};{uv_value}"
+                f"{_format_ts(phone_ts)};{ts_ns};{elapsed_ms};{uv_value}"
             )
             self._ecg_sample_count += 1
 
     def write_acc(self, sample: ACCSample) -> None:
-        """Write accelerometer data to file."""
+        """Write accelerometer data to file, one timestamped row per sample."""
         if not self._active or not self._acc_writer:
             return
 
-        for x, y, z in sample.samples_mg:
-            ts_str = sample.phone_timestamp.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
-            self._acc_writer.write_row(
-                f"{ts_str};{sample.sensor_timestamp_ns};{x};{y};{z}"
+        n = len(sample.samples_mg)
+        sensor_ts, period_ns = frame_sample_timestamps(
+            sample.sensor_timestamp_ns, self._prev_acc_frame_ts, n,
+            self.stream_config.acc.sample_rate,
+        )
+        self._prev_acc_frame_ts = sample.sensor_timestamp_ns
+
+        for i, (ts_ns, (x, y, z)) in enumerate(zip(sensor_ts, sample.samples_mg)):
+            phone_ts = sample.phone_timestamp - timedelta(
+                microseconds=(n - 1 - i) * period_ns / 1000
             )
+            self._acc_writer.write_row(f"{_format_ts(phone_ts)};{ts_ns};{x};{y};{z}")
             self._acc_sample_count += 1
 
     def write_hr(self, sample: HRSample) -> None:
@@ -215,7 +308,7 @@ class RecordingSession:
         if not self._active:
             return
 
-        ts_str = sample.phone_timestamp.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+        ts_str = _format_ts(sample.phone_timestamp)
 
         # HR file
         if self._hr_writer:
@@ -238,30 +331,28 @@ class RecordingSession:
         # RR file
         if self._rr_writer and sample.rr_intervals_ms:
             for rr in sample.rr_intervals_ms:
-                rr_ts_str = sample.phone_timestamp.strftime(
-                    "%Y-%m-%dT%H:%M:%S.%f"
-                )[:-3]
-                self._rr_writer.write_row(f"{rr_ts_str};{int(rr)}")
+                self._rr_writer.write_row(f"{ts_str};{round(rr)}")
                 self._rr_sample_count += 1
 
-    def add_marker(self, marker_type: str = "MARKER_START", label: str = "") -> None:
+    def add_marker(self, marker_type: str = "MARKER_START", label: str = "") -> Optional[MarkerEvent]:
         """Add a marker/annotation to the recording."""
         if not self._active:
-            return
+            return None
 
         now = datetime.now()
         marker = MarkerEvent(
             phone_timestamp=now,
             marker_type=marker_type,
-            label=label,
+            label=label.strip(),
         )
         self._markers.append(marker)
 
         if self._marker_writer:
-            ts_str = now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
-            self._marker_writer.write_row(f"{ts_str};{marker_type} {label}".strip())
+            # Same layout as the Android app: "MARKER_START " with an empty label
+            self._marker_writer.write_row(f"{_format_ts(now)};{marker_type} {marker.label}")
 
-        logger.info(f"Marker added: {marker_type} {label}")
+        logger.info(f"Marker added: {marker_type} {marker.label}")
+        return marker
 
     def _write_metadata(self) -> None:
         """Write session metadata JSON file."""
@@ -269,16 +360,19 @@ class RecordingSession:
             return
 
         metadata = {
+            "label": self.label,
             "device": {
                 "name": self.device_info.name,
                 "address": self.device_info.address,
                 "model": self.device_info.device_model,
                 "id": self.device_info.device_id,
+                "battery_level_at_start": self.battery_level,
             },
             "session": {
                 "start": self._session_start.isoformat() if self._session_start else None,
                 "end": self._session_end.isoformat() if self._session_end else None,
                 "duration_seconds": self.duration_seconds,
+                "end_reason": self._end_reason,
             },
             "streams": {
                 "ecg": {
@@ -309,14 +403,14 @@ class RecordingSession:
                 for m in self._markers
             ],
             "software": {
-                "name": "PolarRecorder",
-                "version": "1.0.0",
+                "name": APP_NAME,
+                "version": APP_VERSION,
                 "platform": "PC/Python",
             },
         }
 
         meta_path = self._session_dir / "session_metadata.json"
-        with open(meta_path, "w") as f:
-            json.dump(metadata, f, indent=2)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
 
-        logger.info(f"Session metadata saved: {meta_path}")
+        logger.debug(f"Session metadata saved: {meta_path}")

@@ -4,6 +4,10 @@ Premium dark theme inspired by medical/research monitoring systems.
 Uses a deep navy-black base with teal/cyan accents.
 """
 
+from functools import lru_cache
+
+from PySide6.QtGui import QFont, QFontDatabase
+
 # ─── Color Palette ──────────────────────────────────────────────────────────────
 COLORS = {
     # Base
@@ -45,9 +49,45 @@ COLORS = {
     "chart_bg": "#0a0e17",         # Chart background
 }
 
+# Status level → color, for status dots and chips
+LEVEL_COLORS = {
+    "ok": COLORS["success"],
+    "warning": COLORS["warning"],
+    "error": COLORS["error"],
+    "muted": COLORS["text_muted"],
+    "info": COLORS["text_secondary"],
+}
+
+
+# ─── Fonts ──────────────────────────────────────────────────────────────────────
+# Asking Qt for a family that isn't installed makes it scan every font
+# (slow startup on macOS), so resolve to installed families once.
+# These need a QApplication, so call them only after it is created.
+
+@lru_cache(maxsize=None)
+def ui_font_family() -> str:
+    if "Inter" in QFontDatabase.families():
+        return "Inter"
+    return QFontDatabase.systemFont(QFontDatabase.GeneralFont).family()
+
+
+@lru_cache(maxsize=None)
+def mono_font_family() -> str:
+    families = set(QFontDatabase.families())
+    for family in ("JetBrains Mono", "SF Mono", "Menlo", "Cascadia Mono", "Consolas", "DejaVu Sans Mono"):
+        if family in families:
+            return family
+    return QFontDatabase.systemFont(QFontDatabase.FixedFont).family()
+
+
+def mono_font(point_size: int) -> QFont:
+    return QFont(mono_font_family(), point_size)
+
 
 # ─── Stylesheet ─────────────────────────────────────────────────────────────────
-STYLESHEET = f"""
+def build_stylesheet() -> str:
+    mono = mono_font_family()
+    return f"""
 /* ─── Global ─────────────────────────────────────────────────────── */
 QMainWindow {{
     background-color: {COLORS['bg_primary']};
@@ -56,18 +96,17 @@ QMainWindow {{
 QWidget {{
     background-color: {COLORS['bg_primary']};
     color: {COLORS['text_primary']};
-    font-family: 'Inter', 'Segoe UI', 'Roboto', sans-serif;
     font-size: 13px;
 }}
 
 /* ─── Scroll Areas ───────────────────────────────────────────────── */
-QScrollArea {{
+QScrollArea, QScrollArea > QWidget > QWidget {{
     border: none;
     background-color: transparent;
 }}
 
 QScrollBar:vertical {{
-    background-color: {COLORS['bg_secondary']};
+    background-color: transparent;
     width: 8px;
     margin: 0;
     border-radius: 4px;
@@ -83,40 +122,42 @@ QScrollBar::handle:vertical:hover {{
     background-color: {COLORS['text_muted']};
 }}
 
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
     height: 0;
+    background: none;
 }}
 
 /* ─── Labels ─────────────────────────────────────────────────────── */
 QLabel {{
     background-color: transparent;
-    padding: 2px;
+    padding: 0px;
 }}
 
-QLabel[class="title"] {{
-    font-size: 20px;
-    font-weight: 700;
-    color: {COLORS['text_primary']};
-    letter-spacing: 1px;
+QLabel[class="muted"] {{
+    color: {COLORS['text_muted']};
+    font-size: 11px;
 }}
 
-QLabel[class="subtitle"] {{
-    font-size: 14px;
+QLabel[class="secondary"] {{
     color: {COLORS['text_secondary']};
+    font-size: 12px;
+}}
+
+QLabel[class="mono"] {{
+    font-family: '{mono}';
 }}
 
 QLabel[class="stat-value"] {{
-    font-size: 28px;
+    font-size: 16px;
     font-weight: 700;
     color: {COLORS['accent']};
-    font-family: 'JetBrains Mono', 'Consolas', monospace;
+    font-family: '{mono}';
 }}
 
 QLabel[class="stat-label"] {{
-    font-size: 11px;
+    font-size: 10px;
     color: {COLORS['text_muted']};
-    text-transform: uppercase;
-    letter-spacing: 1px;
 }}
 
 /* ─── Buttons ────────────────────────────────────────────────────── */
@@ -125,10 +166,9 @@ QPushButton {{
     color: {COLORS['text_primary']};
     border: 1px solid {COLORS['border']};
     border-radius: 8px;
-    padding: 10px 20px;
+    padding: 8px 14px;
     font-size: 13px;
     font-weight: 600;
-    min-height: 20px;
 }}
 
 QPushButton:hover {{
@@ -143,7 +183,12 @@ QPushButton:pressed {{
 QPushButton:disabled {{
     color: {COLORS['text_muted']};
     background-color: {COLORS['bg_secondary']};
-    border-color: {COLORS['bg_secondary']};
+    border-color: {COLORS['border']};
+}}
+
+QPushButton[class="small"] {{
+    padding: 5px 10px;
+    font-size: 12px;
 }}
 
 QPushButton[class="primary"] {{
@@ -165,7 +210,7 @@ QPushButton[class="primary"]:disabled {{
 QPushButton[class="danger"] {{
     background-color: transparent;
     color: {COLORS['error']};
-    border-color: {COLORS['error']};
+    border: 1px solid {COLORS['error']};
 }}
 
 QPushButton[class="danger"]:hover {{
@@ -184,23 +229,65 @@ QPushButton[class="success"]:hover {{
     background-color: #059669;
 }}
 
+QPushButton[class="success"]:disabled {{
+    background-color: {COLORS['bg_tertiary']};
+    color: {COLORS['text_muted']};
+}}
+
+QPushButton[class="record"] {{
+    background-color: {COLORS['error']};
+    color: white;
+    border: none;
+    font-size: 14px;
+    font-weight: 700;
+    padding: 11px 14px;
+}}
+
+QPushButton[class="record"]:hover {{
+    background-color: #dc2626;
+}}
+
+QPushButton[class="record"]:disabled {{
+    background-color: {COLORS['bg_tertiary']};
+    color: {COLORS['text_muted']};
+}}
+
+QPushButton[class="stop"] {{
+    background-color: transparent;
+    color: {COLORS['error']};
+    border: 2px solid {COLORS['error']};
+    font-size: 14px;
+    font-weight: 700;
+    padding: 10px 14px;
+}}
+
+QPushButton[class="stop"]:hover {{
+    background-color: {COLORS['error']};
+    color: white;
+}}
+
 /* ─── Group Boxes / Cards ────────────────────────────────────────── */
 QGroupBox {{
     background-color: {COLORS['bg_secondary']};
     border: 1px solid {COLORS['border']};
     border-radius: 12px;
-    margin-top: 24px;
+    margin-top: 22px;
+    padding: 14px 12px 12px 12px;
     font-weight: 600;
 }}
 
 QGroupBox::title {{
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    padding: 4px 12px;
+    padding: 2px 6px;
+    left: 6px;
     color: {COLORS['text_secondary']};
     font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
+    background-color: transparent;
+}}
+
+QGroupBox QWidget {{
+    background-color: transparent;
 }}
 
 /* ─── Combo Box ──────────────────────────────────────────────────── */
@@ -208,8 +295,8 @@ QComboBox {{
     background-color: {COLORS['bg_input']};
     color: {COLORS['text_primary']};
     border: 1px solid {COLORS['border']};
-    border-radius: 8px;
-    padding: 6px 10px;
+    border-radius: 6px;
+    padding: 4px 8px;
     min-height: 18px;
 }}
 
@@ -217,16 +304,19 @@ QComboBox:hover {{
     border-color: {COLORS['accent']};
 }}
 
+QComboBox:disabled {{
+    color: {COLORS['text_muted']};
+}}
+
 QComboBox::drop-down {{
     border: none;
-    padding-right: 8px;
+    width: 16px;
 }}
 
 QComboBox QAbstractItemView {{
     background-color: {COLORS['bg_tertiary']};
     color: {COLORS['text_primary']};
     border: 1px solid {COLORS['border']};
-    border-radius: 8px;
     selection-background-color: {COLORS['accent_dim']};
     selection-color: {COLORS['accent']};
     padding: 4px;
@@ -237,6 +327,10 @@ QCheckBox {{
     spacing: 8px;
     color: {COLORS['text_primary']};
     background-color: transparent;
+}}
+
+QCheckBox:disabled {{
+    color: {COLORS['text_muted']};
 }}
 
 QCheckBox[class="ecg"] {{
@@ -251,30 +345,21 @@ QCheckBox[class="hr"] {{
     color: {COLORS['chart_hr']};
 }}
 
-/* ─── Spin Box ───────────────────────────────────────────────────── */
-QSpinBox, QDoubleSpinBox {{
-    background-color: {COLORS['bg_input']};
-    color: {COLORS['text_primary']};
-    border: 1px solid {COLORS['border']};
-    border-radius: 8px;
-    padding: 6px 10px;
-}}
-
-QSpinBox:hover, QDoubleSpinBox:hover {{
-    border-color: {COLORS['accent']};
-}}
-
 /* ─── Line Edit ──────────────────────────────────────────────────── */
 QLineEdit {{
     background-color: {COLORS['bg_input']};
     color: {COLORS['text_primary']};
     border: 1px solid {COLORS['border']};
     border-radius: 8px;
-    padding: 8px 12px;
+    padding: 7px 10px;
 }}
 
 QLineEdit:focus {{
     border-color: {COLORS['accent']};
+}}
+
+QLineEdit:disabled {{
+    color: {COLORS['text_muted']};
 }}
 
 /* ─── List Widget ────────────────────────────────────────────────── */
@@ -287,9 +372,9 @@ QListWidget {{
 }}
 
 QListWidget::item {{
-    padding: 10px 12px;
+    padding: 6px 8px;
     border-radius: 6px;
-    margin: 2px;
+    margin: 1px;
 }}
 
 QListWidget::item:hover {{
@@ -301,12 +386,25 @@ QListWidget::item:selected {{
     color: {COLORS['accent']};
 }}
 
+QListWidget[class="markers"] {{
+    font-family: '{mono}';
+    font-size: 11px;
+}}
+
+QListWidget[class="markers"]::item {{
+    padding: 2px 6px;
+}}
+
 /* ─── Tab Widget ─────────────────────────────────────────────────── */
 QTabWidget::pane {{
     border: 1px solid {COLORS['border']};
     border-radius: 8px;
     background-color: {COLORS['bg_secondary']};
     top: -1px;
+}}
+
+QTabWidget::pane > QWidget {{
+    background-color: {COLORS['bg_secondary']};
 }}
 
 QTabBar::tab {{
@@ -316,7 +414,7 @@ QTabBar::tab {{
     border-bottom: none;
     border-top-left-radius: 8px;
     border-top-right-radius: 8px;
-    padding: 8px 20px;
+    padding: 7px 18px;
     margin-right: 2px;
     font-weight: 600;
 }}
@@ -336,14 +434,13 @@ QTabBar::tab:hover:!selected {{
 QProgressBar {{
     background-color: {COLORS['bg_input']};
     border: none;
-    border-radius: 4px;
-    height: 6px;
+    border-radius: 2px;
     text-align: center;
 }}
 
 QProgressBar::chunk {{
     background-color: {COLORS['accent']};
-    border-radius: 4px;
+    border-radius: 2px;
 }}
 
 /* ─── Status Bar ─────────────────────────────────────────────────── */
@@ -351,8 +448,11 @@ QStatusBar {{
     background-color: {COLORS['bg_secondary']};
     color: {COLORS['text_secondary']};
     border-top: 1px solid {COLORS['border']};
-    padding: 4px 12px;
     font-size: 12px;
+}}
+
+QStatusBar QLabel {{
+    padding: 2px 8px;
 }}
 
 /* ─── Splitter ───────────────────────────────────────────────────── */
@@ -382,10 +482,41 @@ QToolTip {{
 QTextEdit, QPlainTextEdit {{
     background-color: {COLORS['bg_input']};
     color: {COLORS['text_secondary']};
-    border: 1px solid {COLORS['border']};
+    border: none;
     border-radius: 8px;
     padding: 8px;
-    font-family: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
+    font-family: '{mono}';
     font-size: 12px;
 }}
+
+/* ─── Message Boxes ──────────────────────────────────────────────── */
+QMessageBox {{
+    background-color: {COLORS['bg_secondary']};
+}}
+
+QMessageBox QPushButton {{
+    min-width: 80px;
+}}
 """
+
+
+def chip_style(level: str, font_size: int = 11) -> str:
+    """Stylesheet for a small rounded status chip QLabel."""
+    color = LEVEL_COLORS.get(level, COLORS["text_secondary"])
+    return (
+        f"color: {color}; border: 1px solid {color}; border-radius: 6px; "
+        f"padding: 1px 7px; font-size: {font_size}px; font-weight: 600; "
+        f"font-family: '{mono_font_family()}'; background: transparent;"
+    )
+
+
+def dot_style(level: str, size: int = 14) -> str:
+    """Stylesheet for a colored status dot (a QLabel showing "●")."""
+    color = LEVEL_COLORS.get(level, COLORS["text_secondary"])
+    return f"color: {color}; font-size: {size}px; background: transparent;"
+
+
+def repolish(widget) -> None:
+    """Re-apply the stylesheet after changing a dynamic property like "class"."""
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
