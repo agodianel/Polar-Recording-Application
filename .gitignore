@@ -30,3 +30,6 @@ Thumbs.db
 *.log
 recordings/
 example data from app/
+
+# Participant recordings (keep out of the public repo)
+Recorded_Polar H10/

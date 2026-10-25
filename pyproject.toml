@@ -1,10 +1,17 @@
 [project]
 name = "polarrecorder"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.0.0"
+description = "Polar H10 ECG/ACC/HR data acquisition and live visualization"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "polar-python>=1.0.0",
+    "bleak>=0.22.0",
+    "PySide6>=6.6.0",
+    "pyqtgraph>=0.13.0",
+    "qasync>=0.27.0",
+    "numpy>=1.24.0",
+    # Analysis scripts (compare_hr.py)
     "matplotlib>=3.10.9",
     "scipy>=1.17.1",
 ]

@@ -45,11 +45,11 @@ logger = logging.getLogger("PolarRecorder")
 
 def main():
     """Application entry point."""
-    from polar_recorder.utils.config import AppConfig
+    from polar_recorder.utils.config import APP_VERSION, AppConfig
     from polar_recorder.app import run
 
     logger.info("=" * 60)
-    logger.info("  PolarRecorder v1.0.0")
+    logger.info(f"  PolarRecorder v{APP_VERSION}")
     logger.info("  Polar H10 Data Acquisition & Live Visualization")
     logger.info("=" * 60)
 

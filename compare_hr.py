@@ -4,6 +4,7 @@ Uses Pan-Tompkins-inspired QRS detection for robust R-peak finding.
 """
 
 import csv
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -11,7 +12,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import butter, filtfilt, find_peaks
 
 
-SESSION = Path("Recorded_Polar H10/P04 - Standing")
+USAGE = "usage: python compare_hr.py <session folder>"
 
 
 def read_ecg(path: Path):
@@ -92,7 +93,9 @@ def compute_hr_from_rr(rr_intervals_s):
 
 
 def main():
-    base = SESSION
+    if len(sys.argv) != 2:
+        sys.exit(USAGE)
+    base = Path(sys.argv[1])
     ecg_path = list(base.glob("*_ECG.txt"))[0]
     hr_path = list(base.glob("*_HR.txt"))[0]
 
@@ -135,7 +138,11 @@ def main():
     peak_times_valid = peak_times[1:][valid_mask]
 
     hr_ecg = compute_hr_from_rr(rr_valid)
-    hr_ecg_smooth = np.convolve(hr_ecg, np.ones(7) / 7, mode="same")
+    # 7-beat moving average; divide by the per-point window size so the
+    # zero-padded edges don't drag the first/last values toward 0
+    kernel = np.ones(7)
+    hr_ecg_smooth = (np.convolve(hr_ecg, kernel, mode="same")
+                     / np.convolve(np.ones_like(hr_ecg), kernel, mode="same"))
 
     # Interpolate Polar HR to ECG beat times for comparison
     hr_polar_at_ecg = np.interp(peak_times_valid, t_hr, hr_firmware)
@@ -167,34 +174,30 @@ def main():
     print(f"  Bland-Altman 95% LoA: [{loa_lower:.1f}, {loa_upper:.1f}] BPM")
 
     # ── Plot ──
+    # Only the two zoomed ECG panels share a time axis; the HR panel spans the
+    # whole session and the Bland-Altman x-axis is BPM, not time.
     fig, axes = plt.subplots(4, 1, figsize=(14, 12),
-                             sharex=True,
                              gridspec_kw={"height_ratios": [2, 1, 2, 2]})
-
-    # Subsample for plotting dense ECG traces
-    plot_step = max(1, len(t_ecg) // 5000)
-    t_plot = t_ecg[::plot_step]
-    ecg_plot = ecg_uv[::plot_step]
-    filt_plot = filtered[::plot_step]
-    int_plot = integrated[::plot_step]
 
     # 1: Full raw ECG with R-peaks (zoomed)
     ax = axes[0]
-    # Show a clean 10-second window for readability
+    # Show a clean 10-second window for readability, at full resolution
+    # (only ~1300 samples, so no subsampling — that would cut through the QRS peaks)
     zoom_end = 10.0
-    zm = t_plot < zoom_end
-    ax.plot(t_plot[zm], ecg_plot[zm], color="#555", lw=0.6)
+    zm = t_ecg < zoom_end
+    ax.plot(t_ecg[zm], ecg_uv[zm], color="#555", lw=0.6)
     pk = peaks[t_ecg[peaks] < zoom_end]
     ax.scatter(t_ecg[pk], ecg_uv[pk], color="red", s=30, zorder=5)
     ax.set_ylabel("ECG (µV)")
     ax.set_title(f"ECG with detected R-peaks ({len(peaks)} total)")
+    ax.set_xlim(0, zoom_end)
     ax.grid(True, alpha=0.3)
 
     # 2: Full filtered + integrated (10s zoom)
     ax = axes[1]
-    zm_f = t_plot < zoom_end
-    ax.plot(t_plot[zm_f], filt_plot[zm_f], color="steelblue", lw=0.6, label="Filtered (5-15 Hz)")
-    ax.plot(t_plot[zm_f], int_plot[zm_f], color="orange", lw=0.8, label="Integrated (150ms MA)")
+    ax.sharex(axes[0])
+    ax.plot(t_ecg[zm], filtered[zm], color="steelblue", lw=0.6, label="Filtered (5-15 Hz)")
+    ax.plot(t_ecg[zm], integrated[zm], color="orange", lw=0.8, label="Integrated (150ms MA)")
     ax.scatter(t_ecg[pk], filtered[pk], color="red", s=30, zorder=5)
     ax.set_ylabel("Amplitude")
     ax.legend(fontsize=8)
@@ -211,6 +214,7 @@ def main():
     ax.set_ylabel("Heart Rate (BPM)")
     ax.legend(fontsize=9)
     ax.set_title("Heart Rate: Polar H10 firmware vs ECG R-peak detection")
+    ax.set_xlabel("Time (s)")
     ax.grid(True, alpha=0.3)
 
     stats = (

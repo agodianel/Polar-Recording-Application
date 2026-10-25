@@ -1,15 +1,17 @@
 """Real-time chart widgets using pyqtgraph.
 
-GPU-accelerated plotting for ECG (130 Hz), ACC (200 Hz), and HR data
+GPU-accelerated plotting for ECG (130 Hz), ACC (25-200 Hz), and HR data
 with smooth scrolling, grid lines, and research-grade appearance.
 """
+
+import time
+from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
-from PySide6.QtCore import Qt
 
-from polar_recorder.ui.styles import COLORS
+from polar_recorder.ui.styles import COLORS, chip_style, mono_font, mono_font_family
 
 
 def setup_pyqtgraph():
@@ -21,7 +23,79 @@ def setup_pyqtgraph():
     )
 
 
-class ECGChartWidget(QWidget):
+class _ChartBase(QWidget):
+    """Common header (title, stream status chip, live value) and plot styling."""
+
+    def __init__(self, title: str, color: str, x_label: str, y_label: str, y_units: str, parent=None):
+        super().__init__(parent)
+        self._dirty = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        header = self._header = QHBoxLayout()
+        header.setSpacing(8)
+        title_label = QLabel(f"●  {title}")
+        title_label.setStyleSheet(
+            f"color: {color}; font-weight: 700; font-size: 14px; background: transparent;"
+        )
+        self._status_chip = QLabel("—")
+        self._status_chip.setToolTip("Live data rate received from the strap")
+        self.set_status("—", "muted")
+        self._value_label = QLabel("")
+        self._value_label.setStyleSheet(
+            f"color: {COLORS['text_secondary']}; font-family: '{mono_font_family()}'; "
+            f"font-size: 12px; background: transparent;"
+        )
+        header.addWidget(title_label)
+        header.addWidget(self._status_chip)
+        header.addStretch()
+        header.addWidget(self._value_label)
+        layout.addLayout(header)
+
+        self._plot_widget = pg.PlotWidget()
+        self._plot_widget.showGrid(x=True, y=True, alpha=0.15)
+        self._plot_widget.setLabel("bottom", x_label, units="s")
+        self._plot_widget.setLabel("left", y_label, units=y_units)
+        self._plot_widget.setMouseEnabled(x=False, y=False)
+        self._plot_widget.setMenuEnabled(False)
+        self._plot_widget.hideButtons()
+        self._plot_widget.getPlotItem().getViewBox().disableAutoRange()
+
+        for axis_name in ["bottom", "left"]:
+            axis = self._plot_widget.getAxis(axis_name)
+            axis.setPen(pg.mkPen(COLORS["border"], width=1))
+            axis.setTextPen(COLORS["text_muted"])
+            axis.setStyle(tickFont=mono_font(9))
+        # Keep the left axis a fixed width so the three charts line up
+        self._plot_widget.getAxis("left").setWidth(60)
+        # SI prefixes only make sense for SI units (ECG in V → mV), not "kmG"
+        self._plot_widget.getAxis("left").enableAutoSIPrefix(y_units == "V")
+
+        layout.addWidget(self._plot_widget, 1)
+
+    def set_status(self, text: str, level: str) -> None:
+        """Update the stream status chip (e.g. "130 Hz" / "no data" / "off")."""
+        self._status_chip.setText(text)
+        self._status_chip.setStyleSheet(chip_style(level))
+
+    def _auto_y(self, lo: float, hi: float, min_span: float) -> None:
+        """Rescale Y only when the data leaves the view or fills a small part of it.
+
+        Rescaling on every frame makes the trace jump around; this hysteresis
+        keeps the axis steady while the signal stays in a similar range.
+        """
+        span = max(hi - lo, min_span)
+        mid = (lo + hi) / 2
+        target_lo, target_hi = mid - span * 0.6, mid + span * 0.6
+        (cur_lo, cur_hi) = self._plot_widget.getPlotItem().getViewBox().viewRange()[1]
+        cur_span = cur_hi - cur_lo
+        if lo < cur_lo or hi > cur_hi or cur_span > 2.5 * (target_hi - target_lo):
+            self._plot_widget.setYRange(target_lo, target_hi, padding=0)
+
+
+class ECGChartWidget(_ChartBase):
     """Real-time ECG waveform display.
 
     Shows a continuous scrolling ECG trace at 130 Hz with a configurable
@@ -29,100 +103,54 @@ class ECGChartWidget(QWidget):
     """
 
     def __init__(self, window_seconds: float = 5.0, parent=None):
-        super().__init__(parent)
+        super().__init__("ECG", COLORS["chart_ecg"], "Time", "ECG", "V", parent)
         self.window_seconds = window_seconds
         self.sample_rate = 130
         self.buffer_size = int(self.sample_rate * self.window_seconds)
-
-        # Ring buffer for ECG data
         self._data = np.zeros(self.buffer_size, dtype=np.float32)
-        self._time = np.linspace(
-            -self.window_seconds, 0, self.buffer_size, dtype=np.float32
-        )
         self._write_idx = 0
 
-        self._setup_ui()
+        self._plot_widget.setXRange(-self.window_seconds, 0, padding=0)
+        self._plot_widget.setYRange(-1e-3, 1.5e-3, padding=0)
+        self._curve = self._plot_widget.plot(pen=pg.mkPen(COLORS["chart_ecg"], width=1.5))
+        self.reset()
 
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        # Header
-        header = QHBoxLayout()
-        title = QLabel("⚡ ECG")
-        title.setStyleSheet(
-            f"color: {COLORS['chart_ecg']}; font-weight: 700; "
-            f"font-size: 14px; background: transparent;"
-        )
-        self._value_label = QLabel("-- µV")
-        self._value_label.setStyleSheet(
-            f"color: {COLORS['text_muted']}; font-family: 'JetBrains Mono', monospace; "
-            f"font-size: 12px; background: transparent;"
-        )
-        header.addWidget(title)
-        header.addStretch()
-        header.addWidget(self._value_label)
-        layout.addLayout(header)
-
-        # Plot widget
-        self._plot_widget = pg.PlotWidget()
-        self._plot_widget.setMinimumHeight(200)
-        self._plot_widget.showGrid(x=True, y=True, alpha=0.15)
-        self._plot_widget.setLabel("bottom", "Time (← Past | 0 = Now)", units="s")
-        self._plot_widget.setLabel("left", "ECG", units="µV")
-        self._plot_widget.setXRange(-self.window_seconds, 0)
-        self._plot_widget.setMouseEnabled(x=False, y=True)
-        self._plot_widget.hideButtons()
-
-        # Style the axes
-        for axis_name in ["bottom", "left"]:
-            axis = self._plot_widget.getAxis(axis_name)
-            axis.setPen(pg.mkPen(COLORS["border"], width=1))
-            axis.setTextPen(COLORS["text_muted"])
-            axis.setStyle(tickFont=pg.QtGui.QFont("JetBrains Mono", 9))
-
-        # ECG trace
-        self._curve = self._plot_widget.plot(
-            pen=pg.mkPen(COLORS["chart_ecg"], width=1.5),
-        )
-
-        layout.addWidget(self._plot_widget)
+    def reset(self):
+        self._data[:] = 0
+        self._write_idx = 0
+        self._curve.setData([], [])
+        self._value_label.setText("-- µV")
+        self._dirty = False
 
     def add_samples(self, samples_uv: list):
         """Add new ECG samples to the ring buffer."""
         for val in samples_uv:
             self._data[self._write_idx % self.buffer_size] = val
             self._write_idx += 1
+        self._dirty = True
 
     def update_plot(self):
         """Refresh the plot with current buffer contents."""
-        if self._write_idx == 0:
+        if not self._dirty:
             return
+        self._dirty = False
 
-        # Build the display buffer from the ring buffer
         n = min(self._write_idx, self.buffer_size)
         if self._write_idx >= self.buffer_size:
             start = self._write_idx % self.buffer_size
-            display_data = np.concatenate([
-                self._data[start:],
-                self._data[:start],
-            ])
+            display_data = np.concatenate([self._data[start:], self._data[:start]])
         else:
             display_data = self._data[:n]
 
-        # Create time axis
+        # Plot in volts so pyqtgraph's SI prefixes label the axis (µV / mV)
+        volts = display_data * 1e-6
         t = np.linspace(-n / self.sample_rate, 0, n, dtype=np.float32)
-
-        self._curve.setData(t, display_data)
-
-        # Update the value label
-        if n > 0:
-            latest = display_data[-1]
-            self._value_label.setText(f"{latest:.0f} µV")
+        self._curve.setData(t, volts)
+        self._auto_y(float(volts.min()), float(volts.max()), min_span=0.5e-3)
+        self._value_label.setText(f"{display_data[-1]:.0f} µV")
 
 
-class ACCChartWidget(QWidget):
+class ACCChartWidget(_ChartBase):
     """Real-time 3-axis accelerometer display.
 
     Shows X, Y, Z acceleration traces in different colors with
@@ -130,64 +158,16 @@ class ACCChartWidget(QWidget):
     """
 
     def __init__(self, window_seconds: float = 10.0, sample_rate: int = 200, parent=None):
-        super().__init__(parent)
+        super().__init__("Accelerometer", COLORS["chart_acc_x"], "Time", "Acceleration", "mG", parent)
         self.window_seconds = window_seconds
-        self.sample_rate = sample_rate
-        self.buffer_size = int(self.sample_rate * self.window_seconds)
 
-        # Ring buffers for X, Y, Z
-        self._data_x = np.zeros(self.buffer_size, dtype=np.float32)
-        self._data_y = np.zeros(self.buffer_size, dtype=np.float32)
-        self._data_z = np.zeros(self.buffer_size, dtype=np.float32)
-        self._write_idx = 0
-
-        self._setup_ui()
-
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        # Header
-        header = QHBoxLayout()
-        title = QLabel("📐 Accelerometer")
-        title.setStyleSheet(
-            f"color: {COLORS['text_primary']}; font-weight: 700; "
-            f"font-size: 14px; background: transparent;"
-        )
-        self._value_label = QLabel("X: -- Y: -- Z: --")
-        self._value_label.setStyleSheet(
-            f"color: {COLORS['text_muted']}; font-family: 'JetBrains Mono', monospace; "
-            f"font-size: 11px; background: transparent;"
-        )
-        header.addWidget(title)
-        header.addStretch()
-        header.addWidget(self._value_label)
-        layout.addLayout(header)
-
-        # Plot widget
-        self._plot_widget = pg.PlotWidget()
-        self._plot_widget.setMinimumHeight(180)
-        self._plot_widget.showGrid(x=True, y=True, alpha=0.15)
-        self._plot_widget.setLabel("bottom", "Time (← Past | 0 = Now)", units="s")
-        self._plot_widget.setLabel("left", "Acceleration", units="mG")
-        self._plot_widget.setXRange(-self.window_seconds, 0)
-        self._plot_widget.setMouseEnabled(x=False, y=True)
-        self._plot_widget.hideButtons()
+        self._plot_widget.setXRange(-self.window_seconds, 0, padding=0)
+        self._plot_widget.setYRange(-1200, 1200, padding=0)
         self._plot_widget.addLegend(
             offset=(10, 10),
             labelTextColor=COLORS["text_secondary"],
-            labelTextSize="10pt",
+            labelTextSize="9pt",
         )
-
-        # Style axes
-        for axis_name in ["bottom", "left"]:
-            axis = self._plot_widget.getAxis(axis_name)
-            axis.setPen(pg.mkPen(COLORS["border"], width=1))
-            axis.setTextPen(COLORS["text_muted"])
-            axis.setStyle(tickFont=pg.QtGui.QFont("JetBrains Mono", 9))
-
-        # Three traces
         self._curve_x = self._plot_widget.plot(
             pen=pg.mkPen(COLORS["chart_acc_x"], width=1.5), name="X"
         )
@@ -197,8 +177,26 @@ class ACCChartWidget(QWidget):
         self._curve_z = self._plot_widget.plot(
             pen=pg.mkPen(COLORS["chart_acc_z"], width=1.5), name="Z"
         )
+        self.set_sample_rate(sample_rate)
 
-        layout.addWidget(self._plot_widget)
+    def set_sample_rate(self, sample_rate: int):
+        """Resize the ring buffers for a new stream rate (clears the chart)."""
+        self.sample_rate = sample_rate
+        self.buffer_size = int(self.sample_rate * self.window_seconds)
+        self._data_x = np.zeros(self.buffer_size, dtype=np.float32)
+        self._data_y = np.zeros(self.buffer_size, dtype=np.float32)
+        self._data_z = np.zeros(self.buffer_size, dtype=np.float32)
+        self.reset()
+
+    def reset(self):
+        self._data_x[:] = 0
+        self._data_y[:] = 0
+        self._data_z[:] = 0
+        self._write_idx = 0
+        for curve in (self._curve_x, self._curve_y, self._curve_z):
+            curve.setData([], [])
+        self._value_label.setText("X --  Y --  Z --")
+        self._dirty = False
 
     def add_samples(self, samples_mg: list):
         """Add new accelerometer samples (list of (x, y, z) tuples)."""
@@ -208,14 +206,15 @@ class ACCChartWidget(QWidget):
             self._data_y[idx] = y
             self._data_z[idx] = z
             self._write_idx += 1
+        self._dirty = True
 
     def update_plot(self):
         """Refresh the plot with current buffer contents."""
-        if self._write_idx == 0:
+        if not self._dirty:
             return
+        self._dirty = False
 
         n = min(self._write_idx, self.buffer_size)
-
         if self._write_idx >= self.buffer_size:
             start = self._write_idx % self.buffer_size
             dx = np.concatenate([self._data_x[start:], self._data_x[:start]])
@@ -227,116 +226,84 @@ class ACCChartWidget(QWidget):
             dz = self._data_z[:n]
 
         t = np.linspace(-n / self.sample_rate, 0, n, dtype=np.float32)
-
         self._curve_x.setData(t, dx)
         self._curve_y.setData(t, dy)
         self._curve_z.setData(t, dz)
 
-        if n > 0:
-            self._value_label.setText(
-                f"X: {dx[-1]:.0f}  Y: {dy[-1]:.0f}  Z: {dz[-1]:.0f}"
-            )
+        lo = float(min(dx.min(), dy.min(), dz.min()))
+        hi = float(max(dx.max(), dy.max(), dz.max()))
+        self._auto_y(lo, hi, min_span=500)
+        self._value_label.setText(f"X {dx[-1]:.0f}  Y {dy[-1]:.0f}  Z {dz[-1]:.0f}")
 
 
-class HRChartWidget(QWidget):
-    """Real-time heart rate and RR interval display.
+class HRChartWidget(_ChartBase):
+    """Real-time heart rate display.
 
-    Shows HR trend over time and current BPM in a large readout.
+    Shows the HR trend over a scrolling time window, the current BPM
+    in a large readout, and the latest RR interval.
     """
 
     def __init__(self, window_seconds: float = 120.0, parent=None):
-        super().__init__(parent)
+        super().__init__("Heart rate", COLORS["chart_hr"], "Time", "HR", "BPM", parent)
         self.window_seconds = window_seconds
-        self.max_samples = int(window_seconds)  # ~1 sample per second
+        self.max_samples = int(window_seconds) * 2  # HR arrives ~1/s; leave headroom
 
-        self._hr_data = np.zeros(self.max_samples, dtype=np.float32)
-        self._hr_time = np.zeros(self.max_samples, dtype=np.float32)
-        self._write_idx = 0
-        self._current_hr = 0
-        self._start_time = None
+        # Times are float64: float32 can't resolve seconds at monotonic/epoch magnitudes
+        self._hr_data = np.zeros(self.max_samples, dtype=np.float64)
+        self._hr_time = np.zeros(self.max_samples, dtype=np.float64)
 
-        self._setup_ui()
-
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-
-        # BPM Header
-        header = QHBoxLayout()
-
-        title = QLabel("❤️  Heart Rate")
-        title.setStyleSheet(
-            f"color: {COLORS['chart_hr']}; font-weight: 700; "
-            f"font-size: 14px; background: transparent;"
-        )
-
-        self._bpm_label = QLabel("-- BPM")
+        self._bpm_label = QLabel()
         self._bpm_label.setStyleSheet(
             f"color: {COLORS['chart_hr']}; font-weight: 700; "
-            f"font-family: 'JetBrains Mono', monospace; font-size: 24px; "
-            f"background: transparent;"
+            f"font-family: '{mono_font_family()}'; font-size: 22px; background: transparent;"
         )
+        self._header.addWidget(self._bpm_label)
 
-        header.addWidget(title)
-        header.addStretch()
-        header.addWidget(self._bpm_label)
-        layout.addLayout(header)
-
-        # Plot widget
-        self._plot_widget = pg.PlotWidget()
-        self._plot_widget.setMinimumHeight(150)
-        self._plot_widget.showGrid(x=True, y=True, alpha=0.15)
-        self._plot_widget.setLabel("bottom", "Time (Relative)", units="s")
-        self._plot_widget.setLabel("left", "HR", units="BPM")
-        self._plot_widget.setYRange(40, 200)
-        self._plot_widget.setMouseEnabled(x=False, y=True)
-        self._plot_widget.hideButtons()
-
-        for axis_name in ["bottom", "left"]:
-            axis = self._plot_widget.getAxis(axis_name)
-            axis.setPen(pg.mkPen(COLORS["border"], width=1))
-            axis.setTextPen(COLORS["text_muted"])
-            axis.setStyle(tickFont=pg.QtGui.QFont("JetBrains Mono", 9))
-
-        # HR trend line
+        self._plot_widget.setXRange(-self.window_seconds, 0, padding=0)
+        self._plot_widget.setYRange(40, 120, padding=0)
         self._curve = self._plot_widget.plot(
-            pen=pg.mkPen(COLORS["chart_hr"], width=2.5),
+            pen=pg.mkPen(COLORS["chart_hr"], width=2),
             symbol="o",
             symbolSize=4,
             symbolBrush=COLORS["chart_hr"],
             symbolPen=None,
         )
+        self.reset()
 
-        layout.addWidget(self._plot_widget)
+    def reset(self):
+        self._write_idx = 0
+        self._curve.setData([], [])
+        self._bpm_label.setText("-- BPM")
+        self._value_label.setText("")
 
-    def add_sample(self, hr_bpm: int, timestamp_offset: float):
-        """Add a new HR sample."""
-        self._current_hr = hr_bpm
-
+    def add_sample(self, hr_bpm: int, rr_intervals_ms: Optional[list] = None,
+                   timestamp: Optional[float] = None):
+        """Add a new HR sample. `timestamp` is a time.monotonic() value."""
         idx = self._write_idx % self.max_samples
         self._hr_data[idx] = hr_bpm
-        self._hr_time[idx] = timestamp_offset
+        self._hr_time[idx] = time.monotonic() if timestamp is None else timestamp
         self._write_idx += 1
 
+        self._bpm_label.setText(f"{hr_bpm} BPM")
+        if rr_intervals_ms:
+            self._value_label.setText(f"RR {rr_intervals_ms[-1]:.0f} ms")
+
     def update_plot(self):
-        """Refresh the plot."""
+        """Refresh the plot. Runs every frame so the trace scrolls even between samples."""
         if self._write_idx == 0:
             return
 
         n = min(self._write_idx, self.max_samples)
-
         if self._write_idx >= self.max_samples:
             start = self._write_idx % self.max_samples
             data = np.concatenate([self._hr_data[start:], self._hr_data[:start]])
-            time = np.concatenate([self._hr_time[start:], self._hr_time[:start]])
+            times = np.concatenate([self._hr_time[start:], self._hr_time[:start]])
         else:
             data = self._hr_data[:n]
-            time = self._hr_time[:n]
+            times = self._hr_time[:n]
 
-        # Normalize time to relative seconds
-        if n > 0:
-            time_rel = time - time[-1]
-            self._curve.setData(time_rel, data)
-
-        self._bpm_label.setText(f"{self._current_hr} BPM")
+        time_rel = times - time.monotonic()
+        visible = time_rel >= -self.window_seconds
+        self._curve.setData(time_rel[visible], data[visible])
+        if visible.any():
+            self._auto_y(float(data[visible].min()), float(data[visible].max()), min_span=30)

@@ -26,6 +26,7 @@ class PolarScanner:
         self._discovered: dict[str, DeviceInfo] = {}
         self._on_device_found: Optional[Callable[[DeviceInfo], None]] = None
         self._scanning = False
+        self._stop_event: Optional[asyncio.Event] = None
 
     @property
     def is_scanning(self) -> bool:
@@ -35,27 +36,38 @@ class PolarScanner:
         """Set callback invoked when a new Polar device is discovered."""
         self._on_device_found = callback
 
+    def stop(self) -> None:
+        """End a running scan early."""
+        if self._stop_event is not None:
+            self._stop_event.set()
+
     async def scan(self) -> List[DeviceInfo]:
-        """Scan for nearby Polar devices.
+        """Scan for nearby Polar devices until the timeout or stop() is called.
 
         Returns:
             List of discovered DeviceInfo objects.
         """
         self._discovered.clear()
         self._scanning = True
+        self._stop_event = asyncio.Event()
 
         logger.info(f"Starting BLE scan (timeout={self.timeout}s)...")
 
         try:
             scanner = BleakScanner(detection_callback=self._detection_callback)
             await scanner.start()
-            await asyncio.sleep(self.timeout)
-            await scanner.stop()
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self.timeout)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                await scanner.stop()
         except Exception as e:
             logger.error(f"BLE scan failed: {e}")
             raise
         finally:
             self._scanning = False
+            self._stop_event = None
 
         devices = list(self._discovered.values())
         logger.info(f"Scan complete. Found {len(devices)} Polar device(s).")

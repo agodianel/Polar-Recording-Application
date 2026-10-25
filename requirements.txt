@@ -4,3 +4,6 @@ PySide6>=6.6.0
 pyqtgraph>=0.13.0
 qasync>=0.27.0
 numpy>=1.24.0
+# Analysis scripts (compare_hr.py)
+matplotlib>=3.10.9
+scipy>=1.17.1

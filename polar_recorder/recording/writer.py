@@ -4,6 +4,7 @@ Supports CSV (semicolon-delimited, matching Android app format).
 """
 
 import logging
+import time
 from pathlib import Path
 from typing import Optional, TextIO
 
@@ -17,16 +18,25 @@ class CSVWriter:
     for maximum compatibility with existing research pipelines.
     """
 
-    def __init__(self, filepath: Path, header: str, buffer_size: int = 100):
+    def __init__(
+        self,
+        filepath: Path,
+        header: str,
+        buffer_size: int = 100,
+        flush_interval_sec: float = 1.0,
+    ):
         """Initialize a CSV writer.
 
         Args:
             filepath: Output file path.
             header: Header line (semicolon-separated column names).
             buffer_size: Number of rows to buffer before flushing.
+            flush_interval_sec: Max time rows may sit in the buffer, so slow
+                streams (HR, markers) still reach the disk promptly.
         """
         self.filepath = filepath
         self.buffer_size = buffer_size
+        self.flush_interval_sec = flush_interval_sec
         self._buffer: list[str] = []
         self._file: Optional[TextIO] = None
         self._row_count = 0
@@ -35,6 +45,7 @@ class CSVWriter:
         self._file = open(filepath, "w", encoding="utf-8", newline="")
         self._file.write(header + "\r\n")
         self._file.flush()
+        self._last_flush = time.monotonic()
 
         logger.debug(f"CSVWriter opened: {filepath}")
 
@@ -50,7 +61,10 @@ class CSVWriter:
         self._buffer.append(row)
         self._row_count += 1
 
-        if len(self._buffer) >= self.buffer_size:
+        if (
+            len(self._buffer) >= self.buffer_size
+            or time.monotonic() - self._last_flush >= self.flush_interval_sec
+        ):
             self.flush()
 
     def flush(self) -> None:
@@ -59,6 +73,7 @@ class CSVWriter:
             self._file.write("\r\n".join(self._buffer) + "\r\n")
             self._file.flush()
             self._buffer.clear()
+        self._last_flush = time.monotonic()
 
     def close(self) -> None:
         """Flush remaining buffer and close the file."""
@@ -75,4 +90,7 @@ class CSVWriter:
         return self._row_count
 
     def __del__(self):
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            pass
